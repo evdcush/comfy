@@ -1,0 +1,78 @@
+name: comfyui
+
+# SERVING:
+# tailscale serve --bg --https=443 --set-path=/comfy http://127.0.0.1:${COMFYUI_PORT:-8188}
+#   ACCESS: https://your-tailnet.ts.net/comfy
+#
+# NB: The ComfyUI browser app assumes it is hosted at root. Tailscale sub-path
+#     serving is useful for API access, but the web UI is most reliable via
+#     http://127.0.0.1:${COMFYUI_PORT:-8188} or a root-hosted proxy.
+
+networks:
+  ai-backend:
+    external: true
+
+services:
+  comfyui:
+    image: yanwk/comfyui-boot:${COMFYUI_IMAGE_TAG:-cu130-slim-v2}
+    container_name: comfyui
+    init: true
+    restart: unless-stopped
+    pull_policy: always
+
+    ports:
+      - "127.0.0.1:${COMFYUI_PORT:-8188}:8188"
+
+    environment:
+      # Keep ComfyUI reachable from Open WebUI and other services on ai-backend.
+      CLI_ARGS: "${COMFYUI_CLI_ARGS:---listen 0.0.0.0 --port 8188 --enable-manager}"
+
+      # Keep model/cache downloads in the shared model tree instead of app data.
+      HF_HOME: /root/ComfyUI/models/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /root/ComfyUI/models/.cache/huggingface/hub
+      TORCH_HOME: /root/ComfyUI/models/.cache/torch
+
+      # NVIDIA_VISIBLE_DEVICES is a practical runtime guard in addition to the
+      # compose device reservation below. Default to GPU 0 so llama.cpp can keep
+      # GPU 1 as its main GPU in the reference dual-4090 setup.
+      NVIDIA_VISIBLE_DEVICES: "${COMFYUI_NVIDIA_VISIBLE_DEVICES:-0}"
+      NVIDIA_DRIVER_CAPABILITIES: "${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}"
+
+      # Privacy / telemetry convention used by the rest of the stack.
+      DO_NOT_TRACK: "true"
+      ANONYMIZED_TELEMETRY: "false"
+
+    volumes:
+      # Persistent ComfyUI install, custom nodes, Python user state, and config.
+      - ./data/root:/root"
+
+      # Model storage is intentionally not duplicated under app data.
+      #- "${COMFYUI_MODEL_DIR:-${HOME}/Models/comfy}:/root/ComfyUI/models"
+      - /home/evan/Models/comfy:/root/ComfyUI/models
+
+      # User-facing runtime data stays under the self-hosted data hierarchy.
+      - ./data/input:/root/ComfyUI/input
+      - ./data/output:/root/ComfyUI/output
+      - ./data/workflows:/root/ComfyUI/user/default/workflows
+      - ./data/user-scripts:/root/user-scripts
+
+    ipc: host
+    networks:
+      - ai-backend
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8188/system_stats', timeout=5).read()\""
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
