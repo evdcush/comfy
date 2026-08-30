@@ -1,12 +1,11 @@
 name: comfyui
 
 # SERVING:
-# tailscale serve --bg --https=443 --set-path=/comfy http://127.0.0.1:${COMFYUI_PORT:-8188}
-#   ACCESS: https://your-tailnet.ts.net/comfy
+# tailscale serve --bg --https=443 --set-path=/comfy \
+#   http://127.0.0.1:${COMFYUI_PORT:-8188}
 #
-# NB: The ComfyUI browser app assumes it is hosted at root. Tailscale sub-path
-#     serving is useful for API access, but the web UI is most reliable via
-#     http://127.0.0.1:${COMFYUI_PORT:-8188} or a root-hosted proxy.
+# The browser UI is still most reliable at:
+# http://127.0.0.1:${COMFYUI_PORT:-8188}
 
 networks:
   ai-backend:
@@ -14,65 +13,125 @@ networks:
 
 services:
   comfyui:
-    image: yanwk/comfyui-boot:${COMFYUI_IMAGE_TAG:-cu130-slim-v2}
+    image: mmartial/comfyui-nvidia-docker:ubuntu24_cuda13.0-20260805
     container_name: comfyui
     init: true
     restart: unless-stopped
-    pull_policy: always
+
+    # The image tag itself is pinned, so don't re-pull it on every start.
+    pull_policy: if_not_present
 
     ports:
       - "127.0.0.1:${COMFYUI_PORT:-8188}:8188"
 
     environment:
-      # Keep ComfyUI reachable from Open WebUI and other services on ai-backend.
-      CLI_ARGS: "${COMFYUI_CLI_ARGS:---listen 0.0.0.0 --port 8188 --enable-manager}"
+      # mmartial container configuration
+      USE_UV: "true"
 
-      # Keep model/cache downloads in the shared model tree instead of app data.
-      HF_HOME: /root/ComfyUI/models/.cache/huggingface
-      HUGGINGFACE_HUB_CACHE: /root/ComfyUI/models/.cache/huggingface/hub
-      TORCH_HOME: /root/ComfyUI/models/.cache/torch
+      # IMPORTANT:
+      # Leave upgrades enabled for the FIRST successful initialization of a
+      # brand-new ./data/run directory. After it is working and pinned, change
+      # this to "true".
+      DISABLE_UPGRADES: "false"
 
-      # NVIDIA_VISIBLE_DEVICES is a practical runtime guard in addition to the
-      # compose device reservation below. Default to GPU 0 so llama.cpp can keep
-      # GPU 1 as its main GPU in the reference dual-4090 setup.
-      NVIDIA_VISIBLE_DEVICES: "${COMFYUI_NVIDIA_VISIBLE_DEVICES:-0}"
-      NVIDIA_DRIVER_CAPABILITIES: "${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}"
+      WANTED_UID: "${WANTED_UID:-1000}"
+      WANTED_GID: "${WANTED_GID:-1000}"
 
-      # Privacy / telemetry convention used by the rest of the stack.
+      # All persistent user/model/input/output content lives below /basedir.
+      BASE_DIRECTORY: /basedir
+      SECURITY_LEVEL: normal
+
+      # Enable current ComfyUI Manager through the image's supported mechanism.
+      USE_NEW_MANAGER: "true"
+      ENABLE_MANAGER_LEGACY_UI: "false"
+
+      # For the ACE-Step validation baseline:
+      # use ordinary PyTorch attention, not SageAttention or --fast.
+      COMFY_CMDLINE_EXTRA: "--use-pytorch-cross-attention"
+
+      # Shared Hugging Face / Torch caches under your model tree.
+      HF_HOME: /basedir/models/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /basedir/models/.cache/huggingface/hub
+      TORCH_HOME: /basedir/models/.cache/torch
+
+      # Both 4090s visible for now.
+      NVIDIA_VISIBLE_DEVICES: "0,1"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+
+      # Privacy / telemetry convention.
       DO_NOT_TRACK: "true"
       ANONYMIZED_TELEMETRY: "false"
 
+      TOKENIZERS_PARALLELISM: "false"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+
     volumes:
-      # Persistent ComfyUI install, custom nodes, Python user state, and config.
-      - ./data/root:/root"
+      # REQUIRED by mmartial.
+      #
+      # Contains:
+      #   ComfyUI source
+      #   Python virtualenv
+      #   pip/uv caches
+      #   runtime configuration
+      - type: bind
+        source: ./data/run
+        target: /comfy/mnt
 
-      # Model storage is intentionally not duplicated under app data.
-      #- "${COMFYUI_MODEL_DIR:-${HOME}/Models/comfy}:/root/ComfyUI/models"
-      - /home/evan/Models/comfy:/root/ComfyUI/models
+      # General persistent ComfyUI user state.
+      - type: bind
+        source: ./data/basedir
+        target: /basedir
 
-      # User-facing runtime data stays under the self-hosted data hierarchy.
-      - ./data/input:/root/ComfyUI/input
-      - ./data/output:/root/ComfyUI/output
-      - ./data/workflows:/root/ComfyUI/user/default/workflows
-      - ./data/user-scripts:/root/user-scripts
+      # Keep the large model tree outside application data.
+      # This more-specific mount overrides /basedir/models from the mount above.
+      - type: bind
+        source: /home/evan/Models/comfy
+        target: /basedir/models
+
+      # Keep your existing data hierarchy for user-facing files.
+      - type: bind
+        source: ./data/input
+        target: /basedir/input
+
+      - type: bind
+        source: ./data/output
+        target: /basedir/output
+
+      - type: bind
+        source: ./data/workflows
+        target: /basedir/user/default/workflows
+
+      # mmartial looks here for startup scripts.
+      - type: bind
+        source: ./data/user-scripts
+        target: /userscripts_dir
+        read_only: true
 
     ipc: host
+
     networks:
       - ai-backend
 
     healthcheck:
       test:
         - CMD-SHELL
-        - "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8188/system_stats', timeout=5).read()\""
+        - >-
+          python3 -c "import urllib.request;
+          urllib.request.urlopen(
+          'http://127.0.0.1:8188/system_stats',
+          timeout=5).read()"
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 90s
+      start_period: 5m
 
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['0']
-              capabilities: [gpu]
+              device_ids: ["0", "1"]
+              capabilities:
+                - gpu
+                - compute
+                - utility
