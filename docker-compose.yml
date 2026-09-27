@@ -13,7 +13,7 @@ networks:
 
 services:
   comfyui:
-    image: mmartial/comfyui-nvidia-docker:ubuntu24_cuda13.0-20260805
+    image: mmartial/comfyui-nvidia-docker:ubuntu24_cuda13.2-20260914 #comfyui-nvidia-docker:ubuntu24_cuda13.0-20260805
     container_name: comfyui
     init: true
     restart: unless-stopped
