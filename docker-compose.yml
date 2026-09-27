@@ -13,12 +13,16 @@ networks:
 
 services:
   comfyui:
-    image: mmartial/comfyui-nvidia-docker:ubuntu24_cuda13.2-20260914 #comfyui-nvidia-docker:ubuntu24_cuda13.0-20260805
+    build:
+      context: .
+      args:
+        BASE_IMAGE: mmartial/comfyui-nvidia-docker:ubuntu24_cuda13.2-20260914
+        COMFY_CLI_VERSION: "1.21.0"
     container_name: comfyui
     init: true
     restart: unless-stopped
 
-    # The image tag itself is pinned, so don't re-pull it on every start.
+    # The base image tag itself is pinned, so don't re-pull it on every start.
     pull_policy: if_not_present
 
     ports:
